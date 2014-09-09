@@ -1,4 +1,4 @@
-Data-Table-Lazy
+Data-Tab
 
 Data tables in memory are a good way to think about a lot of problems.
 They're a convenient way to grab data from SQL, and they map onto
@@ -15,37 +15,6 @@ underlying data that can reflect changes made through the table API
 back into the data source.  That's not implemented yet, but it would
 give us a simple way to treat (say) database and Excel spreadsheet
 matrices in exactly the same way.
-
-INSTALLATION
-
-To install this module, run the following commands:
-
-	perl Makefile.PL
-	make
-	make test
-	make install
-
-SUPPORT AND DOCUMENTATION
-
-After installing, you can find documentation for this module with the
-perldoc command.
-
-    perldoc Data::Table::Lazy
-
-You can also look for information at:
-
-    RT, CPAN's request tracker (report bugs here)
-        http://rt.cpan.org/NoAuth/Bugs.html?Dist=Data-Table-Lazy
-
-    AnnoCPAN, Annotated CPAN documentation
-        http://annocpan.org/dist/Data-Table-Lazy
-
-    CPAN Ratings
-        http://cpanratings.perl.org/d/Data-Table-Lazy
-
-    Search CPAN
-        http://search.cpan.org/dist/Data-Table-Lazy/
-
 
 LICENSE AND COPYRIGHT
 
