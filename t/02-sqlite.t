@@ -4,7 +4,6 @@ use strict;
 use warnings FATAL => 'all';
 use Test::More;
 use Data::Dumper;
-use DBI;
 
 plan tests => 4;
 
@@ -12,7 +11,7 @@ plan tests => 4;
 use Data::Tab;
 
 my $dbh;
-eval { $dbh = DBI->connect('dbi:SQLite:dbname=t/test.sqlt'); };
+eval { use DBI; $dbh = DBI->connect('dbi:SQLite:dbname=t/test.sqlt'); };
 SKIP: {
     skip "SQLite does not appear to be installed; not testing SQLite integration", 4 if $@;
     my $query1 = Data::Tab->query ($dbh, "select * from my_table");

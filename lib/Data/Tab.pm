@@ -11,11 +11,11 @@ Data::Tab - Iterators as tabular data structures
 
 =head1 VERSION
 
-Version 0.01
+Version 0.02
 
 =cut
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 
 =head1 SYNOPSIS
@@ -544,10 +544,12 @@ Done.
 package Data::Tab::db;
 
 use Data::Tab;
-use DBI;
+use Carp;
 
 sub connect {
    my $self = bless ({}, shift);
+   eval "use DBI";
+   croak "DBI not installed" if $@;
    $self->{dbh} = DBI->connect(@_);
    $self;
 }
