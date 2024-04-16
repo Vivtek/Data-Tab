@@ -1,5 +1,9 @@
 Revision history for Data::Tab
 
+0.03 2015-09-03
+
+ - Added getrowhash for convenience
+
 0.02 2014-09-13
 
  - Fixed dependency on DBI (thanks, CPANtesters!)

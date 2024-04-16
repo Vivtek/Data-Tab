@@ -3,330 +3,501 @@ package Data::Tab;
 use 5.006;
 use strict;
 use warnings FATAL => 'all';
+use Iterator::Records;
+use List::MoreUtils qw(first_index);
+use Module::Load 'none';
 use Carp;
+use Data::Dumper;
 
 =head1 NAME
 
-Data::Tab - Iterators as tabular data structures
+Data::Tab - Tables for the Decl data ecosystem
 
 =head1 VERSION
 
-Version 0.02
+Version 0.05
 
 =cut
 
-our $VERSION = '0.02';
+our $VERSION = '0.05';
 
 
 =head1 SYNOPSIS
 
-C<Data::Tab> is inspired by L<Data::Table>, in that the central data
-structure is a two-dimensional matrix of data values with named headers.
-However, there are some significant differences, chief of which is that the data sources
-can be lazily evaluated, that is, they can be either iterators or static arrays.
+The primary purpose of C<Data::Tab> is to provide a tabular buffer for record streams produced by L<Iterator::Records>, but it can be used for
+any other tabular data as well. The datatab is more akin to a dataframe than to a relational table; its rows are ordered and can optionally
+be named with unique key values. It can, however, be used as the underlying storage structure for an SQLite instance to get the best of both
+worlds.
 
-BE WARNED: this module defines a lot of API that isn't actually implemented yet.
-It is a work in slow progress.  (By "slow" I mean I need something every year or so and put it in.)
+=head1 CREATING A DATATAB
 
-=head1 METHODS
+A datatab can be created whole cloth, but is probably more frequently going to be created by loading a record stream.
 
-=head2 new (data, [headers], [types], [rowheaders], [underlying])
+=head2 new (parameters)
 
-Creates a new table, with data being either an arrayref of arrayrefs, or a coderef that should iterate a series of arrayrefs,
-or an arrayref of arrayrefs with a terminal coderef.  Case 1 is a set of static data.  Case 2 is an unbuffered iterator; it
-cannot be rewound, just read.  Finally, Case 3 is a buffered iterator; during a read series the arrayref rows will be returned
-until the coderef is encountered, after which the coderef will be asked for more rows, which will be inserted into the buffer,
-until there are no more rows and the table is left as a static dataset.
+Parameters come in a hashref, with the following keys available:
 
-The headers are an optional arrayref of strings to be used as the column names.
-
-The types are an optional arrayref of (advisory) types to be used for formatting the data, or a single scalar indicating
-the datatype for I<all> the elements in the table.
-
-The rowheaders are either an arrayref of names for each row (primarily useful for static datasets, obviously) or a coderef
-for generating a name based on the data in the row. Rowheaders are not yet implemented.
-
-The "underlying" parameter is an object inheriting from <Data::Tab::Underlying> that is responsible for passing
-changes to the data table through to the underlying object, if this is applicable.  This makes the data table a live view.
-It's not yet implemented.
+ key           purpose
+ ---           -------
+ data          either an arrayref of arrayrefs, an Iterator::Records factory, or a coderef that returns arrayrefs
+ headers       an arrayref of field names; if the data is an itrecs factory and "headers" is not specified, it will be taken from the itrecs
+ types         an arrayref of type names; same caveat for itrecs factories. A type of "9" or "num" will be treated as numeric for comparisons
+ sort          a sort specification; see sort()
+ aggregates    an aggregate specification; see aggregate()
+ hashkey       the name of the field to be used as the key, if this is a hashtab
+ primary       the name of the primary value field, if this is a hashtab
+ 
 
 =cut
 
 sub new {
     my $class = shift;
-    my $self = {
-        data => shift,   # The buffered data, if any
-        more => undef,   # The iterator, if any
-        headers => shift,
-        types => shift,
-        rowheaders => shift,
-        underlying => shift,
-        buffer => undef, # 0 if we don't want to keep a buffer
-        cursor => 0,
-    };
+    my $self = {};
+    bless ($self, $class);
     
-    if (ref $self->{data} eq 'CODE') {
-       $self->{more} = $self->{data};
-       $self->{data} = undef;
-    } elsif (ref $self->{data} eq 'ARRAY') {
-       # TODO: split out the iterator now, if there is one.
-    } else {
-       # TODO: consider other handy ways of wrapping these.
-       croak "invalid data type creating $class instance";
+    # Read the first parm as input data if it's not a string (and thus a key)
+    my $data;
+    if (scalar @_ and ref $_[0]) {
+       $data = shift;
+    }
+
+    while (@_) {
+       my $parm = shift;
+       last unless @_;
+       my $value = shift;
+       if ($parm eq 'headers' and ref $value eq 'ARRAY') {
+          $self->set_headers(@$value);
+       } else {
+          $self->{$parm} = $value;
+       }
     }
     
-    bless ($self, $class);
-}
-
-=head2 query (dbh, sql, [parameters])
-
-If you have DBI installed - and who doesn't? - then you can query the database with this function in a single step and have a
-lazy table returned.  Clearly, if you don't have DBI installed, you can't have a dbh handle, so no error checking is done.
-
-At some point there will be an underlying class for SQL that will allow changes made to the lazy table to be reflected in the
-database, but that's a fight for another day.
-
-By default, an SQL query is unbuffered, a pure iterator.  Use query()->buffer() to turn the buffer on before retrieval if that's
-what you want.
-
-Suggested usage:
-
-   my $query = Data::Tab->query($dbh, "select * from my_table where name like ?", '%this%');
-   while ($query->get) {
-      my ($col1, $col2) = @$_;
-      ...
-   }
-   
-Or this:
-
-   print Data::Tab->query($dbh, "select * from my table where customer=?", $customer)->read->show;
-   
-Magic SQL query formatting!
-
-=cut
-
-sub query {
-    my $class = shift;
-    my $dbh = shift;
-    my $sql = shift;
-   
-    my $sth = $dbh->prepare ($sql) || croak $dbh->errstr();
-    $sth->execute(@_);
+    if ($self->{hashkey}) {
+       $self->{hashtab} = {};
+    }
     
-    my $self = {
-        data => undef,  # no buffer by default
-        more => sub {  $sth->fetchrow_arrayref },
-        headers => $sth->{NAME_lc},
-        types => undef, # TODO: later
-        rowheaders => undef,
-        underlying => undef,
-        buffer => 0, # 0 if we don't want to keep a buffer
-        cursor => 0,
-    };
+    if (defined $data) {
+       my $type = ref($data);
+       if ($type eq 'ARRAY') {
+          $data = Iterator::Records->new ($data);
+       } else { # Blithely assume it's an itrecs.
+          croak "data is not an arrayref or a record stream" unless $data->can('fields') and $data->can('iter');
+          $self->{data_source} = $data;
+          $self->{headers} = [ $data->fields ];
+          $self->{types}   = [ $data->types ] if $data->can('types');
+       }
+       $self->load($data);
+    } else {
+       $self->{dim} = [0, 0];
+    }
     
-    bless ($self, $class);
+    $self;
 }
 
-=head2 buffer, unbuffer
+=head2 load (datasource)
 
-Switches the table from buffered mode to unbuffered mode, or vice versa.  If a table is currently buffered, the buffer is
-discarded when unbuffering.  Switching from buffered to unbuffered and back again is a good way to free up memory for longer
-queries that still need buffering.
-
-The buffer can also be set to a given number of rows with e.g. C<buffer(5)>.  Then any incoming rows will discard old rows
-from the beginning of the buffer.  A call to C<buffer(0)> is equivalent to C<unbuffer()>.
+Loads records from the datasource, which should be compatible in terms of number of columns. This same method is called by ->new.
 
 =cut
 
-sub buffer {
-   my $self = shift;
-   $self->{buffer} = shift;
-   $self->{data} = [] unless defined $self->{data};
-   return unless defined $self->{buffer};
-   if ($self->{buffer} == 0) {
-      $self->{data} = undef;
-      return;
+sub load {
+   my ($self, $data) = @_;
+
+   my $iter = $data->iter;
+   $self->{data} = undef;
+   $self->{hashkeycol} = undef;
+   $self->{primarycol} = undef;
+   while (my $record = $iter->()) {
+      $self->add_row ($record);
    }
-   shift @{$self->{data}} while scalar @{$self->{data}} > $self->{buffer};
+   
+   $self;
 }
-sub unbuffer { shift->buffer(0); }
 
-=head2 headers, rowheaders, types, header(n), rowheader(n), type(n)
+=head2 add_row (arrayref of data)
 
-Getter/setter functions for the various parameters of the table.  That is, C<header(n)> will retrieve the header for the
-n-th row, while C<header(n, 'new header')> will set it.  Similarly, C<types(0,0,' ')> will set the scalar type array
-for all rows.
-
-Returns a list in list context, an arrayref in scalar context.
-
-Of these, only C<headers> is implemented.
+This handles actually adding a row of data to the table. If it's the first row ever added, we'll do some recordkeeping (coming up with a header if one isn't already defined, etc.)
 
 =cut
 
-sub headers {
-   my $self = shift;
-   if (@_) {
-      my @headers = ();
-      push @headers, @_;
-      $self->{headers} = \@headers;
+sub add_row {
+   my ($self, $record) = @_;
+   croak 'null record' unless defined $record;
+   croak 'record not array' unless ref $record eq 'ARRAY';
+   
+   if (not defined $self->{data}) {
+      $self->{data} = [];
+      unless (defined $self->{headers}) {
+         $self->set_headers( map { "f$_" } ( 0 .. scalar(@$record)-1 ) );
+      }
+      if (defined $self->{dim}) {
+         $self->{dim}->[1] = scalar @{$self->{headers}} unless $self->{dim}->[1];
+      } else {
+         $self->{dim} = [ 0, scalar @{$self->{headers}} ];
+      }
+      unless (defined $self->{types}) {
+         $self->{types} = [ map {'A'} ( 0 .. scalar @{$self->{headers}}-1 ) ];
+      }
+      unless (defined $self->{maxlen}) {
+         $self->{maxlen} = [ map {0} ( 0 .. scalar @{$self->{headers}}-1 ) ];
+      }
+      unless (defined $self->{multiline}) {
+         $self->{multiline} = [ map {0} ( 0 .. scalar @{$self->{headers}}-1 ) ];
+      }
    }
-   return unless defined wantarray;
-   my @return = @{$self->{headers} || []};
-   return @return if wantarray;
-   return \@return;
-}
-sub rowheaders {
-}
-sub types {
+
+   $self->{dim}->[0] += 1;
+   for (my $i=0; $i<@$record; $i++) {
+      $record->[$i] = '' unless defined $record->[$i];
+      if ($record->[$i] =~ /\n/) {
+         $self->{multiline}->[$i] = 1;
+         foreach my $line (split /\n/, $record->[$i]) {
+            $self->{maxlen}->[$i] = length($line) if length($line) > $self->{maxlen}->[$i];
+         }
+      } else {
+         $self->{maxlen}->[$i] = length($record->[$i]) if not defined $self->{maxlen}->[$i] or length($record->[$i]) > $self->{maxlen}->[$i];
+      }
+   }
+   push @{$self->{data}}, $record;
+   if ($self->{hashkey}) {
+      $self->{hashkeycol} = first_index {$_ eq $self->{hashkey}} @{$self->{headers}} unless defined $self->{hashkeycol};
+      $self->{primarycol} = first_index {$_ eq $self->{primary}} @{$self->{headers}} unless defined $self->{primarycol};
+      
+      #$self->{hashtab}->{$record->[$self->{hashkeycol}]} = scalar @{$self->{data}} - 1;
+      $self->{hashtab}->{$record->[$self->{hashkeycol}]} = $record;
+   }
 }
 
-sub header {
-}
-sub rowheader {
-}
-sub type {
-}
+=head1 CREATING A DATATAB FROM A CATALOG DEFINITION
 
-=head2 dimensions (not yet implemented)
+We can also accept a Decl-notation definition of the table from a L<Data::Catalog> object.
 
-Another getter/setter.  So C<dimensions()> will retrieve the current dimensions of the buffered or static data,
-C<dimensions(10)> will discard rows numbered 10 and up, C<dimensions(0)> is a way to truncate the buffer,
-C<dimensions(undef,5)> will discard columns numbered 5 and up, and C<dimensions(5, 5)> will force the dimensions
-of the table to be 5x5.  If the data is currently smaller in a dimension specified, then "blank" data will be filled
-in; the "blank" value is the type value of the column, or C<undef>.
+=head2 catalog (catalog, name, tag, type, id, lno, node)
+
+This is called by the catalog with the initial definition; we just build an appropriate catalog entry and return it. This is actually a class method;
+the catalog doesn't build a Data::Tab object until activation.
 
 =cut
 
-sub dimensions {
+sub catalog {
+   my ($class, $catalog, $name, $tag, $type, $id, $lno, $node) = @_;
+   my $ref = $node->getp ('ref') || '';
+   $catalog->add_entry ([$name, $tag, $type, '', $ref, $id, $lno, $node]) if $name;
 }
 
-=head2 truncate
+=head2 activate (definition)
 
-If there is a coderef at the end of the data, removes it.  This converts an iterated, buffered data table into a
-static one.  Used on an unbuffered iterator, renders the table useless.
+The C<definition> method is a catalog-specific table loader, but we'll also accept a node by itself. This allows us to load tables quickly even if we don't have
+a catalog in the mix. If this method is given a string, it will just parse it as a single node. If L<Decl::Node> isn't installed, then this will just fail, but
+in that case all of this will fail.
 
-=cut
-
-sub truncate { shift->{more} = undef; }
-
-=head2 reiterate
-
-Tacks a new iterator on the end of a static table, converting it into an iterated table.
+Any Decl node passed in must have its content in the DeclTable format parsed by L<Iterator::Records::DataTable>. Metadata for the table (the hashkey and primary values,
+especially) are expected to be provided as parameters on the node. There might be more data later, depending on use cases.
 
 =cut
 
-sub reiterate { shift->{more} = shift; }
+sub activate {
+   my ($class, $definition) = @_;
+   
+   if (not ref $definition) {
+      Module::Load->load ("Decl::Node") || croak "Decl::Node not installed";
+      $definition = Decl::Node->make_node ($definition);
+   }
+   if (ref $definition eq 'Decl::Node') {
+      $definition = { node => $definition };
+      $definition->{name} = $definition->{node}->name;
+      $definition->{tag} = $definition->{node}->tag;
+   }
+   
+   Module::Load->load ("Iterator::Records::DeclTable");
+   #eval { use Iterator::Records::DeclTable; 1 };
+   #croak "Iterator::Records::DeclTable not installed: $@" if $@;
+   my $iterator = Iterator::Records::DeclTable->new ($definition->{node});
+   
+   my $datatab = $class->new ($iterator);
+   $datatab->{decl} = $definition->{node};
+   $datatab;
+}
 
-=head2 get, rewind
+=head1 BASIC PARAMETER ACCESS
 
-The table has a cursor row that starts at 0.  The C<rewind> function resets that row to 0 if it's been changed.
-The C<get()> function with no parameters gets the cursor row and advances the cursor.  If there's no buffer, it
-just gets the next row from the iterator; if there is a buffer, then the cursor advances along the buffer until
-it gets to the iterator (if there is one) and then returns/buffers rows as it goes.
+Once loaded, the table can report various parameters about its data
 
-However, C<get(1)> will get row 1 in the buffer as an arrayref, and C<get(1, 3)> will get the value from row 1,
-column 3 in the buffer.  A call with an C<undef> row (e.g. C<get(undef, 2)>) will get the numbered column.
+=head2 headers, types, maxlen, rows, cols, dim, multiline
 
-A call to C<get(undef, 'taxes')> will get the column headed taxes, as an arrayref, while C<get('taxes')> will get the
-I<row> labeled 'taxes', if the rowheaders are defined and there is such a row.  If these fail, the call will croak.
-There is no column cursor, so there is no need for syntax for a columnar get with unspecified column.
+=cut
 
-The return value is always a scalar or arrayref.
+sub rows      { $_[0]->{dim}->[0] }
+sub cols      { $_[0]->{dim}->[1] }
+sub dim       { $_[0]->{dim} }
+sub headers   { @{$_[0]->{headers}} }
+sub types     { @{$_[0]->{types}} }
+sub maxlen    { @{$_[0]->{maxlen}} }
+sub multiline { @{$_[0]->{multiline}} }
+
+=head2 set_headers
+
+=cut
+
+sub set_headers {
+   my $self = shift;
+   $self->{headers} = [ @_ ];
+   foreach (my $i = 0; $i < scalar (@_); $i++) {
+      $self->{hdr_idx}->{$_[$i]} = $i;
+   }
+}
+
+=head2 can_reload, reload
+
+If the table was originally loaded from a record iterator, it can re-initiate the iterator to reload data. Check C<can_reload> if you're not sure whether it can.
+
+=cut
+
+sub can_reload { defined ($_[0]->{data_source}) }
+
+=head1 GETTING DATA
+
+Data can be retrieved in a number of different ways, basically single elements as scalars (or, well, whatever they are), rows and columns as lists, iterators
+over all or part of the content, or a segment of the table as an arrayref of arrayrefs or as a new Data::Tab.
+
+=head2 get (field, row)
+
+By default, we use field names (column names) for column access, plus a numeric row starting with 0.
 
 =cut
 
 sub get {
-    my $self = shift;
-    my $row  = shift;
-    my $col  = shift;
-    
-    if (not defined $self->{data}) {
-       return undef unless defined $self->{more};
-       my $ret = $self->{more}->($self);
-       $self->{more} = undef unless defined $ret;
-       return undef unless defined $ret;
-       return ref $ret? $ret : [$ret];
-    }
-    
-    if (not defined $row and not defined $col) {
-       $row = $self->{cursor};
-       $self->{cursor} += 1;
-    }
-    
-    if (defined $row) {
-        # TODO: ignoring dimensions for the moment.
-        my $therow = $self->{data}->[$row];
-        if (not defined $therow and $self->{more}) {
-           my $bufsize = scalar @{$self->{data}};
-           while ($bufsize < $row+1) {
-              $bufsize += 1;
-              $therow = $self->{more}->($self);
-              if (not defined $therow) {
-                 $self->{more} = undef;
-                 return undef;
-              }
-              my @values = ref $therow ? @$therow : ($therow);
-              $therow = \@values;  # Have to take a copy, not reuse the same arrayref.
-              push @{$self->{data}}, $therow;
-              shift @{$self->{data}} while defined $self->{buffer} and scalar @{$self->{data}} > $self->{buffer};
-           }
-        }
-           
-        return $therow unless defined $col;
-        return undef unless defined $therow;
-        return $therow->[$col];
-    }
-    if (defined $col) {
-       my @values;
-       foreach my $r (@{$self->{data}}) {
-          push @values, $r->[$col];
-       }
-       return \@values;
-    }
+   my ($self, $col, $row) = @_;
+   croak 'table has no headers' unless $self->{headers};
+   my $colnum = first_index {$_ eq $col} @{$self->{headers}};
+   croak "table does not have field $col" unless defined $colnum;
+   $self->get_xy ($colnum, $row);
 }
 
-sub rewind { shift->{cursor} = 0; }
+=head2 get_xy (col, row)
 
-=head2 read (limit)
-
-The C<read> method, called on a buffered table with an iterator, reads the entire iterated query result list
-into the buffer, then truncates the table to render it static.  Pass a number to limit the read.
-
-If the table is unbuffered, read turns on buffering before it starts retrieval.
+For numeric access, use C<get_xy>, which takes the column number.
 
 =cut
 
-sub read {
-   my ($self, $limit) = @_;
-   $self->buffer;
-   while ($self->get()) {
-      if (defined $limit) {
-         $limit -= 1;
-         last unless $limit > 0;
-      }
+sub get_xy {
+   my ($self, $col, $row) = @_;
+   return undef unless defined $self->{data};
+   return undef unless defined $self->{data}->[$row];
+   return $self->{data}->[$row]->[$col];
+}
+
+=head2 get_cell (excel_cell_name)
+
+Excel-style cell names are also supported, e.g. "B2".
+
+=cut
+
+sub get_cell {
+   my ($self, $cell) = @_;
+   croak "badly formed cell name $cell" unless $cell =~ /^([A-Za-z]+)(\d+)$/;
+   $self->get_xy (_b26_to_b10 ($1)-1, $2-1);
+}
+sub _b26_to_b10 {  # Credit to Christopher E. Stith, https://www.perlmonks.org/?node_id=270361
+   my @digits = reverse split //, shift;
+   my $i = 1;
+   my $result = 0;
+   for ( @digits ) {
+       $result += ( ord(lc($_)) - ord('a') + 1 ) * $i;
+       $i *= 26;
    }
-   $self;
+   return $result;
 }
 
-=head2 set, setrow, setcol (not yet implemented)
+=head2 get_row (row number), get_col (field name or column number)
 
-A call to C<setrow (row, [values])> sets an entire row in the table, while a single element can be set with 
-C<set (row, col, value)>.  To set a column, use C<setcol (col, [values])> on a buffered or static table.
-As usual, row and col can be numbers or labels.
-
-If an C<underlying> is defined for the table, then it will be notified of the change and can take appropriate 
-action to update the table's underlying object.
+We can get arrayrefs back for any row or column in the table. For column references, we can either use the field name or a numeric column offset.
 
 =cut
 
-sub set {
-}
-sub setrow {
-}
-sub setcol {
+sub get_row {
+   my ($self, $row) = @_;
+   return undef unless defined $self->{data};
+   return $self->{data}->[$row];
 }
 
-=head2 show, show_generic
+sub get_col {
+   my ($self, $col) = @_;
+   return undef unless defined $self->{data};
+   if ($col =~ /[^0-9]/) {
+      croak 'table has no headers' unless $self->{headers};
+      my $idx = $self->{hdr_idx}->{$col};
+      croak "no such field '$col'" unless defined $idx;
+      $col = $idx;
+   }
+   my @vals = map {$_->[$col]} @{$self->{data}};
+   return \@vals;
+}
+
+=head2 get_slice (from_row, to_row, from_col, to_col) or get_slice (excel cell range)
+
+To get a subtable (an arrayref of arrayrefs) we can either use the coordinates of the corners, or specify it with an Excel cell range of the form A2:C6.
+
+=cut
+
+sub get_slice {
+   my $self = shift;
+   my ($row_from, $row_to, $col_from, $col_to);
+   if (scalar(@_) == 1) {
+      my ($from, $to) = split /:/, shift;
+      croak 'cell range malformed' unless defined $to;
+      croak "badly formed cell name $from" unless $from =~ /^([A-Za-z]+)(\d+)$/;
+      ($col_from, $row_from) = (_b26_to_b10 ($1)-1, $2-1);
+      croak "badly formed cell name $to" unless $to =~ /^([A-Za-z]+)(\d+)$/;
+      ($col_to, $row_to) = (_b26_to_b10 ($1)-1, $2-1);
+   } else {
+      ($row_from, $row_to, $col_from, $col_to) = @_;
+      $row_from = 0 unless defined $row_from;
+      $row_to   = $self->rows() - 1 unless defined $row_to;
+      $col_from = 0 unless defined $col_from;
+      $col_to   = scalar ($self->headers) - 1 unless defined $col_to;
+   }
+   
+   my @rows = map {
+      [ @$_[ $col_from .. $col_to ] ]
+   } @{$self->{data}} [ $row_from .. $row_to ];
+   return \@rows;
+}
+
+=head2 take_row (row)
+
+Especially if the table is being used for a queue, you can get a row and remove it from the table in a single step, by row number.
+
+=cut
+
+sub take_row {
+   my ($self, $rownum) = @_;
+   
+   my $row = splice (@{$self->{data}}, $rownum, 1);
+   if (defined $self->{hashtab} and defined $row) {
+      delete $self->{hashtab}->{$row->[$self->{hashkeycol}]};
+   }
+   $row;
+}
+
+
+=head1 GETTING DATA BY INDEX
+
+If the datatab is a hashtab (if it has a hashkey column identified), then it maintains a hashref from the value of the hashkey column to the record.
+A hashtab can thus be used for efficient key-value lookup for anything in the table; it's effectively a way to name each row for retrieval.
+
+=head2 indexed_get (key), indexed_getmeta (key, column)
+
+The C<indexed_getmeta> method retrieves a named column from the row named by the key (it's basically C<get_xy> with named rows and columns). If you've defined a primary
+column (by specifying a C<primary> parameter) you can also use C<indexed_get> to retrieve that primary value.
+
+=cut
+
+sub indexed_get {
+   my $self = shift;
+   croak 'no primary value defined' unless defined $self->{primary};
+   $self->indexed_getmeta (shift, $self->{primary});
+}
+sub indexed_getmeta {
+   my ($self, $key, $column) = @_;
+   croak 'not a hashtab' unless defined $self->{hashtab};
+   return unless defined $self->{hashtab}->{$key};   # 2022-09-06 - "defined" because a key of 0 is legit. I'll keep making this mistake for eternity, apparently.
+   my $idx = $self->{hdr_idx}->{$column};
+   croak "no such field '$column'" unless defined $idx;
+   #$self->get_xy ($idx, $self->{hashtab}->{$key});
+   return $self->{hashtab}->{$key}->[$idx];
+}
+
+=head2 indexed_getrow (key), indexed_getrowhash (key)
+
+Get the entire row indexed by C<key>, either in its native arrayref form or in a hashref form keyed by the field names.
+
+=cut
+
+sub indexed_getrow {
+   my ($self, $key) = @_;
+   croak 'not a hashtab' unless defined $self->{hashtab};
+   #return $self->{data}->[$self->{hashtab}->{$key}];
+   return $self->{hashtab}->{$key};
+}
+sub indexed_getrowhash {
+   my ($self, $key) = @_;
+   my $row = $self->indexed_getrow ($key);
+   return unless $row;
+   my $ret = {};
+   for (my $i = 0; $i < scalar (@{$self->{headers}}); $i++) {
+      $ret->{$self->{headers}->[$i]} = $row->[$i];
+   }
+   return $ret;
+}
+
+
+
+=head1 ITERATING OVER DATA
+
+A common use I have for datatabs is as a buffer for record streams - a place to put them, sort them, slice and dice them, and then get a record stream back
+out. This is where we do that.
+
+=head2 iterate or iterate (row_from, row_to) or iterate (row_from, row_to, col_from, col_to) or iterate (excel_slice)
+
+The C<iterate> method either iterates over the entire table contents or over a subtable using the same semantics as the C<get_slice> method.
+
+=cut
+
+sub iterate {
+   my $self = shift;
+   
+   if (not scalar @_) {   # Non-restricted iterator, dead easy
+      return Iterator::Records->new ( sub {
+         my $i = 0;
+         sub {
+            return unless defined $self->{data};
+            $i += 1;
+            return if $i > scalar @{$self->{data}};
+            return $self->{data}->[$i-1];
+         }
+      }, [ $self->headers ]);
+   }
+
+   my ($row_from, $row_to, $col_from, $col_to);
+   if (scalar(@_) == 1) {
+      my ($from, $to) = split /:/, shift;
+      croak 'cell range malformed' unless defined $to;
+      croak "badly formed cell name $from" unless $from =~ /^([A-Za-z]+)(\d+)$/;
+      ($col_from, $row_from) = (_b26_to_b10 ($1)-1, $2-1);
+      croak "badly formed cell name $to" unless $to =~ /^([A-Za-z]+)(\d+)$/;
+      ($col_to, $row_to) = (_b26_to_b10 ($1)-1, $2-1);
+   } else {
+      ($row_from, $row_to, $col_from, $col_to) = @_;
+      $row_from = 0 unless defined $row_from;
+      $row_to   = $self->rows() - 1 unless defined $row_to;
+      $col_from = 0 unless defined $col_from;
+      $col_to   = scalar ($self->headers) - 1 unless defined $col_to;
+   }
+
+   my @headers = $self->headers;
+   @headers = @headers[$col_from .. $col_to];
+      
+   return Iterator::Records->new ( sub {
+      my $i = $row_from;
+      sub {
+         return unless defined $self->{data};
+         return if $i > $row_to;
+         $i += 1;
+         return if $i > scalar @{$self->{data}};
+
+         my @data = @{$self->{data}->[$i-1]};
+         return [ @data[ $col_from .. $col_to ] ];
+      }
+   }, \@headers);
+   
+}
+
+=head1 DISPLAYING TABULAR DATA
+
+This section is here for historical reasons, but should be considered deprecated. Once I've written Iterator::Records::Write::DeclTab, it will be rewritten.
+
+=head2 show, show_decl, show_generic
 
 Calling C<show> returns the table as text, with C<+-----+> type delineation.  (This method only works if
 Text::Table is installed.)  This only shows the rows actually in the buffer; it will not retrieve iterator
@@ -350,9 +521,13 @@ elected to remove temptation from your path.  To generate HTML, you should use a
 I<good> HTML.  Eventually I'll write one that works with Data::Tab out of the box - drop me a line if you'd like me
 to accelerate that.
 
+For use in Decl-embedded quotes, I use "tabulated" data, which simply uses the field names to align the fields on
+individual rows. This is actually dead easy to generate in this generic framework, so it's implemented here.
+
 =cut
 
 sub show { shift->show_generic ('|', 1, 1); }
+sub show_decl { shift->show_generic ('', 1, 0); }
 sub show_generic {
    eval { require Text::Table; };
    croak "Text::Table not installed" if $@;
@@ -407,115 +582,6 @@ here in generalized form.
 sub report {
 }
 
-=head2 add, glue, insert (not yet implemented)
-
-On the other hand, maybe you just want to append one or more rows.  To do that, just C<add (arrayref)> to add
-a single row, or C<add (table object)> to append all the rows from another table object.  The second parameter,
-if provided, is the header for the new row.
-
-To do the same thing on the column dimension, use C<glue (arrayref)> to tack a new column onto the left of the
-table, or C<glue (table object)> to glue all the columns of a table onto the left.  To insert the columns somewhere
-other than the left, use C<insert (column, table object or arrayref)> and they'll be inserted to the right of
-the column with that number.  Or, if the column isn't a number, then the column headers will be used.
-
-If C<add> or C<glue> is passed a coderef, then the new row will be made by repeated calls to the coderef, each
-call passing the table and the column for arbitrary calculation.  (Or the new column will be made with each row.)
-
-=cut
-
-sub add {
-}
-sub glue {
-}
-sub insert {
-}
-
-=head2 copy (not yet implemented)
-
-The C<copy> method copies an entire table's contents into a segment of the current table.  We specify the upper
-left corner of the target, so to copy the contents without further ado, simply C<copy(0, 0, source)>.  The
-dimensions of the target will be expanded to match.  This doesn't affect the headers.
-
-=cut
-
-sub copy {
-}
-
-=head2 slice (row, rows, col, cols) (not yet implemented)
-
-The C<slice> method is used to extract sections from a table to make a new table object.  For example,
-C<slice<2, 2, 2, 2> slices out a two-by-two chunk from row/column 2,2.  (0-indexed).
-C<slice('total', 1)> slices out the "total" row only.
-
-The return is always a new table object.
-
-=cut
-
-sub slice {
-}
-
-=head2 crop (row, rows, col, cols) (not yet implemented)
-
-Does the same as C<slice>, but destructively in place.
-
-=cut
-
-sub crop {
-}
-
-=head2 sort (function), sortcols (not yet implemented)
-
-Returns a sorting array for the entire table (if buffered, just the part in the buffer) that is produced
-by applying the coderef C<function> to an array [0, 1, 2, ... n].  The C<sort> method does this for the 
-rows, with C<sortcols> doing the same for the columns.
-
-=cut
-
-sub sort {
-}
-sub sortcols {
-}
-
-=head2 shuffle, shufflecols (not yet implemented)
-
-Given an array of row numbers, builds a new table with those rows.  (Or, column numbers for columns for C<shufflecols>.)
-Yes, you can just pass sort's return into shuffle to produce a sorted array - but you don't I<have> to.
-If there are row/column numbers missing, then those rows/columns won't appear in the new table.  Finally, all header,
-type, and rowheader data will be shuffled appropriately as well.
-
-=cut
-
-sub shuffle {
-}
-sub shufflecols {
-}
-
-=head2 filter (function), filtercols (not yet implemented)
-
-Returns an array of rows (or columns) that return a positive result from a coderef.  Again, this can then be used with
-shuffle or shufflecols to produce a new array.
-
-=cut
-
-sub filter {
-}
-sub filtercols {
-}
-
-=head2 flip (not yet implemented)
-
-Flips the entire array rows for columns.  If there was a coderef iterator after the last row, it is discarded.  (That is,
-the table is truncated first.)
-
-If there's an underlying object, the link will be broken.  If you really want to flip the underlying object, say you want
-to flip a section of an Excel spreadsheet, then read it in, flip the array, and write out a new sheet segment - which is
-probably going to be messy unless the section was square to start with.  In the case of an SQL database, what does flipping
-even mean?  Probably nothing.  You probably want to rethink your strategy.
-
-=cut
-
-sub flip {
-}
 
 =head1 AUTHOR
 
@@ -526,40 +592,6 @@ Michael Roberts, C<< <michael at vivtek.com> >>
 Please report any bugs or feature requests to C<bug-Data-Tab at rt.cpan.org>, or through
 the web interface at L<http://rt.cpan.org/NoAuth/ReportBug.html?Queue=Data-Tab>.  I will be notified, and then you'll
 automatically be notified of progress on your bug as I make changes.
-
-
-=head1 Data::Tab::db
-
-Just for simplicity's sake (and to save typing) we also provide a simple wrapper for the DBI class that allows us to say:
-
-   use Data::Tab::db;
-   
-   my $db = Data::Tab::db->connect (my connection parameters)
-   $db->query("select * from my_table")->read->show;
-   
-Done.
-
-=cut
-
-package Data::Tab::db;
-
-use Data::Tab;
-use Carp;
-
-sub connect {
-   my $self = bless ({}, shift);
-   eval "use DBI";
-   croak "DBI not installed" if $@;
-   $self->{dbh} = DBI->connect(@_);
-   $self;
-}
-
-sub query {
-   my $self = shift;
-   Data::Tab->query($self->{dbh}, @_);
-}
-
-sub dbh { shift->{dbh}; }
 
 
 =head1 SUPPORT

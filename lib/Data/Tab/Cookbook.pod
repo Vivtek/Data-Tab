@@ -1,0 +1,54 @@
+=pod
+
+=encoding utf8
+
+=head1 NAME
+
+Data::Tab::Cookbook - Simple recipes for working with datatabs
+
+=head1 DESCRIPTION
+
+The datatab is my answer to in-memory tables; I normally use them to buffer record streams managed with the L<Iterator::Records> modules.
+As such, they mostly just look like ordered recordsets. When I first started thinking about them, I was envisioning a more general matrix manipulation module,
+and you'll see some vestiges of that in this module, but I<mostly> what it does best is to load from iterators, allow you to read and write data, and iterate
+over it again.
+
+=head1 BUFFERING DATA
+
+=head2 Buffering an iterator
+
+You can build a datatab with just an arrayref of arrayrefs (the underlying data structure), but in almost every situation what you'll *really* want to do is to
+buffer an iterator. 
+
+    use Data::Tab;
+    use Iterator::Records;
+
+=head2 Loading from a Decl-style table
+
+The vast majority of my master data ends up being typed in the Decl tabular format, for which we conveniently already have an iterator module, L<Iterator::Records::DeclTable>.
+
+    use Data::Tab;
+    use Iterator::Records::DeclTable;
+
+    my $table = Data::Tab->new ( Iterator::Records::DeclTable (<<EOF) );
+    a   b         c
+    1   Data      Data here, too
+    2   Second    blah blah
+    EOF
+
+=head1 ITERATING OVER CONTENT
+
+=head1 HASHTABS
+
+You can define one of the columns in the table to be a I<hashkey> and another to be a I<primary value>, making the datatab a I<hashtab>.
+
+
+
+=for comment
+That's all I've got patience for; I'm not in a documentational mood today, just wanted to get the cookbook started in order to close this sprint.
+
+Things still to include:
+- Iterating
+- Getting values and subsets
+- Using Excel-style cell addressing
+
