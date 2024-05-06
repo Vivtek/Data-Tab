@@ -8,7 +8,7 @@ WriteMakefile(
     AUTHOR           => q{Michael Roberts <michael@vivtek.com>},
     VERSION_FROM     => 'lib/Data/Tab.pm',
     ABSTRACT_FROM    => 'lib/Data/Tab.pm',
-    LICENSE          => 'Artistic_2_0',
+    LICENSE          => 'perl_5',
     PL_FILES         => {},
     MIN_PERL_VERSION => 5.006,
     CONFIGURE_REQUIRES => {

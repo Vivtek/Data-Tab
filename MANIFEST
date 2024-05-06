@@ -1,6 +1,6 @@
 Changes
 lib/Data/Tab.pm
-lib/Data/Tab/Cookbook.POD
+lib/Data/Tab/Cookbook.pod
 Makefile.PL
 MANIFEST			This list of files
 README

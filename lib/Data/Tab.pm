@@ -255,12 +255,12 @@ If the table was originally loaded from a record iterator, it can re-initiate th
 
 sub can_reload { defined ($_[0]->{data_source}) }
 
-=head1 GETTING DATA
+=head1 GETTING AND SETTING DATA
 
 Data can be retrieved in a number of different ways, basically single elements as scalars (or, well, whatever they are), rows and columns as lists, iterators
 over all or part of the content, or a segment of the table as an arrayref of arrayrefs or as a new Data::Tab.
 
-=head2 get (field, row)
+=head2 get (field, row), set (field, row, value)
 
 By default, we use field names (column names) for column access, plus a numeric row starting with 0.
 
@@ -273,8 +273,15 @@ sub get {
    croak "table does not have field $col" unless defined $colnum;
    $self->get_xy ($colnum, $row);
 }
+sub set {
+   my ($self, $col, $row, $value) = @_;
+   croak 'table has no headers' unless $self->{headers};
+   my $colnum = first_index {$_ eq $col} @{$self->{headers}};
+   croak "table does not have field $col" unless defined $colnum;
+   $self->set_xy ($colnum, $row, $value);
+}
 
-=head2 get_xy (col, row)
+=head2 get_xy (col, row), set_xy (col, row, value)
 
 For numeric access, use C<get_xy>, which takes the column number.
 
@@ -286,8 +293,23 @@ sub get_xy {
    return undef unless defined $self->{data}->[$row];
    return $self->{data}->[$row]->[$col];
 }
+sub set_xy {
+   my ($self, $col, $row, $value) = @_;
+   $self->{data} = [] unless defined $self->{data};
+   $self->{data}->[$row] = [] unless defined $self->{data}->[$row];
+   $self->{data}->[$row]->[$col] = $value;
 
-=head2 get_cell (excel_cell_name)
+   if ($value =~ /\n/) {
+      $self->{multiline}->[$col] = 1;
+      foreach my $line (split /\n/, $value) {
+         $self->{maxlen}->[$col] = length($line) if length($line) > $self->{maxlen}->[$col];
+      }
+   } else {
+      $self->{maxlen}->[$col] = length($value) if not defined $self->{maxlen}->[$col] or length($value) > $self->{maxlen}->[$col];
+   }
+}
+
+=head2 get_cell (excel_cell_name), set_cell (excel_cell_name, value)
 
 Excel-style cell names are also supported, e.g. "B2".
 
@@ -307,6 +329,11 @@ sub _b26_to_b10 {  # Credit to Christopher E. Stith, https://www.perlmonks.org/?
        $i *= 26;
    }
    return $result;
+}
+sub set_cell {
+   my ($self, $cell, $value) = @_;
+   croak "badly formed cell name $cell" unless $cell =~ /^([A-Za-z]+)(\d+)$/;
+   $self->set_xy (_b26_to_b10 ($1)-1, $2-1, $value);
 }
 
 =head2 get_row (row number), get_col (field name or column number)
@@ -381,15 +408,15 @@ sub take_row {
 }
 
 
-=head1 GETTING DATA BY INDEX
+=head1 GETTING/SETTING DATA BY INDEX
 
 If the datatab is a hashtab (if it has a hashkey column identified), then it maintains a hashref from the value of the hashkey column to the record.
 A hashtab can thus be used for efficient key-value lookup for anything in the table; it's effectively a way to name each row for retrieval.
 
-=head2 indexed_get (key), indexed_getmeta (key, column)
+=head2 indexed_get (key), indexed_set (key, value); indexed_getmeta (key, column), indexed_setmeta (key, column, value)
 
 The C<indexed_getmeta> method retrieves a named column from the row named by the key (it's basically C<get_xy> with named rows and columns). If you've defined a primary
-column (by specifying a C<primary> parameter) you can also use C<indexed_get> to retrieve that primary value.
+column (by specifying a C<primary> parameter) you can also use C<indexed_get> to retrieve that primary value or C<indexed_set> to set it.
 
 =cut
 
@@ -398,6 +425,12 @@ sub indexed_get {
    croak 'no primary value defined' unless defined $self->{primary};
    $self->indexed_getmeta (shift, $self->{primary});
 }
+sub indexed_set {
+   my $self = shift;
+   croak 'no primary value defined' unless defined $self->{primary};
+   $self->indexed_setmeta (shift, $self->{primary}, @_);
+}
+
 sub indexed_getmeta {
    my ($self, $key, $column) = @_;
    croak 'not a hashtab' unless defined $self->{hashtab};
@@ -406,6 +439,23 @@ sub indexed_getmeta {
    croak "no such field '$column'" unless defined $idx;
    #$self->get_xy ($idx, $self->{hashtab}->{$key});
    return $self->{hashtab}->{$key}->[$idx];
+}
+sub indexed_setmeta {
+   my ($self, $key, $column, $value) = @_;
+   croak 'not a hashtab' unless defined $self->{hashtab};
+   return unless defined $self->{hashtab}->{$key};
+   my $idx = $self->{hdr_idx}->{$column};
+   croak "no such field '$column'" unless defined $idx;
+   #$self->get_xy ($idx, $self->{hashtab}->{$key});
+   $self->{hashtab}->{$key}->[$idx] = $value;
+   if ($value =~ /\n/) {  # TODO: we really want to move this bit out into a "recalculate maxlen" method
+      $self->{multiline}->[$idx] = 1;
+      foreach my $line (split /\n/, $value) {
+         $self->{maxlen}->[$idx] = length($line) if length($line) > $self->{maxlen}->[$idx];
+      }
+   } else {
+      $self->{maxlen}->[$idx] = length($value) if not defined $self->{maxlen}->[$idx] or length($value) > $self->{maxlen}->[$idx];
+   }
 }
 
 =head2 indexed_getrow (key), indexed_getrowhash (key)
