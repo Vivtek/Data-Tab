@@ -547,7 +547,7 @@ sub iterate {
 
 This section is here for historical reasons, but should be considered deprecated. Once I've written Iterator::Records::Write::DeclTab, it will be rewritten.
 
-=head2 show, show_decl, show_generic
+=head2 show, show_decl, show_data, show_generic
 
 Calling C<show> returns the table as text, with C<+-----+> type delineation.  (This method only works if
 Text::Table is installed.)  This only shows the rows actually in the buffer; it will not retrieve iterator
@@ -572,12 +572,15 @@ I<good> HTML.  Eventually I'll write one that works with Data::Tab out of the bo
 to accelerate that.
 
 For use in Decl-embedded quotes, I use "tabulated" data, which simply uses the field names to align the fields on
-individual rows. This is actually dead easy to generate in this generic framework, so it's implemented here.
+individual rows. This is actually dead easy to generate in this generic framework, so it's implemented here, and it's
+in two different variants. The C<show_decl> method uses numerical alignment for numeric columns, while C<show_data>
+left-aligns everything to make it easier for an iterator to suck it back in from a printed table.
 
 =cut
 
 sub show { shift->show_generic ('|', 1, 1); }
 sub show_decl { shift->show_generic ('', 1, 0); }
+sub show_data { shift->show_generic ('', 1, 0, 1); }
 sub show_generic {
    eval { require Text::Table; };
    croak "Text::Table not installed" if $@;
@@ -587,6 +590,8 @@ sub show_generic {
    my $sep = shift;
    my $headers = shift;
    my $rule = shift;
+   my $left_align = shift || 0;
+   my $aligner = $left_align? "\n&left" : '';
    
    my @headers = ();
    if ($headers) {
@@ -600,10 +605,10 @@ sub show_generic {
    if (defined $sep and @headers) {
       push @c, \$sep if defined $sep;
       foreach my $h (@headers) {
-         push @c, $h, \$sep;
+         push @c, "$h$aligner", \$sep;
       }
    }
-   my $t = Text::Table->new($sep ? @c : @headers);
+   my $t = Text::Table->new($sep ? @c : map { "$_$aligner" } @headers);
    $t->load (@{$self->{data}});
    
    my @rule_p = ('-', '+');

@@ -56,4 +56,27 @@ is ($table1->show_generic('|', ['one', 'two', 'thr'], 0), <<'EOF');
 |3  |4  |5  |
 EOF
 
+# 2024-07-14 - What about numeric alignment? This has been tripping me up this week all of a sudden (because indented numbers don't read back in correctly with the iterator)
+
+$table1 = Data::Tab->new ([ [0, 1, 2, 30],
+                            [1, 2, 3, 4],
+                            [2, 3, 4, 5],
+                            [3, 4, 5, 6] ]);
+
+is ($table1->show_decl(),<<'EOF');
+f0 f1 f2 f3
+0  1  2  30
+1  2  3   4
+2  3  4   5
+3  4  5   6
+EOF
+
+is ($table1->show_data(),<<'EOF');
+f0 f1 f2 f3
+0  1  2  30
+1  2  3  4 
+2  3  4  5 
+3  4  5  6 
+EOF
+
 done_testing();
