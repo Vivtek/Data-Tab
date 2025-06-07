@@ -430,6 +430,11 @@ sub indexed_set {
    croak 'no primary value defined' unless defined $self->{primary};
    $self->indexed_setmeta (shift, $self->{primary}, @_);
 }
+sub indexed_set_or_add {
+   my $self = shift;
+   croak 'no primary value defined' unless defined $self->{primary};
+   $self->indexed_set_or_addmeta (shift, $self->{primary}, @_);
+}
 
 sub indexed_getmeta {
    my ($self, $key, $column) = @_;
@@ -456,6 +461,12 @@ sub indexed_setmeta {
    } else {
       $self->{maxlen}->[$idx] = length($value) if not defined $self->{maxlen}->[$idx] or length($value) > $self->{maxlen}->[$idx];
    }
+}
+sub indexed_set_or_addmeta {
+   my ($self, $key, $column, $value) = @_;
+   croak 'not a hashtab' unless defined $self->{hashtab};
+   $self->add_row ([$key]) unless defined $self->{hashtab}->{$key};
+   return $self->indexed_setmeta ($key, $column, $value);
 }
 
 =head2 indexed_getrow (key), indexed_getrowhash (key)
