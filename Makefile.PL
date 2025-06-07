@@ -19,6 +19,7 @@ WriteMakefile(
     },
     PREREQ_PM => {
         'Iterator::Records'              => 0,
+        'List::MoreUtils'                => 0,
     },
     dist  => { COMPRESS => 'gzip -9f', SUFFIX => 'gz', },
     clean => { FILES => 'Data-Tab-*' },
